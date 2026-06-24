@@ -21,12 +21,10 @@ html, body {
 #game {
   background: #1a1f1a;
   image-rendering: pixelated;
-  max-width: 100vw;
-  max-height: 100vh;
-  width: auto;
-  height: auto;
-  aspect-ratio: 16 / 9;
-  box-shadow: 0 0 60px rgba(0,0,0,0.8) inset, 0 0 30px rgba(0,0,0,0.6);
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  box-shadow: 0 0 60px rgba(0,0,0,0.8) inset;
   cursor: crosshair;
 }
 
@@ -67,6 +65,37 @@ html, body {
 #overlay-body { margin: 14px 0; font-size: 17px; line-height: 1.5; }
 #overlay-body .big { font-size: 26px; color: #ffd86b; font-weight: 700; }
 #overlay-body .danger { color: #ff7a6b; }
+
+/* ---- Selección de personaje ---- */
+.cs-title {
+  color: #8fe36a; font-size: 14px; letter-spacing: 1px;
+  margin: 6px 0 10px; text-transform: uppercase;
+}
+#char-select {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.char-card {
+  background: #0e130e;
+  border: 1px solid #2c3a2c;
+  border-radius: 9px;
+  padding: 8px 6px 9px;
+  cursor: pointer;
+  transition: transform 0.08s ease, border-color 0.15s ease, background 0.15s ease;
+  text-align: center;
+}
+.char-card:hover { transform: translateY(-2px); border-color: #4d6b3a; background: #131a12; }
+.char-card.sel {
+  border-color: #8fe36a;
+  background: #16210f;
+  box-shadow: 0 0 0 1px #8fe36a, 0 0 16px rgba(120, 230, 90, 0.3);
+}
+.char-card canvas { display: block; margin: 0 auto 2px; }
+.char-card .cn { font-size: 13px; font-weight: 700; color: #e8efe8; }
+.char-card .cs { font-size: 11px; color: #ffd86b; margin: 2px 0; }
+.char-card .cd { font-size: 10px; color: #93a393; line-height: 1.25; min-height: 24px; }
 
 #start-btn {
   margin-top: 10px;

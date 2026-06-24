@@ -9,14 +9,18 @@
   // ----------------------------------------------------------------------
   //  Configuración general
   // ----------------------------------------------------------------------
-  const W = 1280;            // resolución lógica
-  const H = 720;
+  const H = 720;             // alto lógico fijo
+  // el ancho lógico se adapta a la proporción real de la ventana (sin franjas negras)
+  const aspect = () => Math.min(3.0, Math.max(1.2, window.innerWidth / window.innerHeight));
+  let W = Math.round(H * aspect());
   const REGIONS_X = 4;       // tamaño del mapa en regiones (4x4 = 16 pantallas)
   const REGIONS_Y = 4;
   const EDGE = 40;           // margen para detectar cambio de región
+  const SCALE = 1.5;         // tamaño global de personajes/criaturas (más grande = más detalle)
 
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
+  canvas.width = W; canvas.height = H;
   const overlay = document.getElementById("overlay");
   const overlayBody = document.getElementById("overlay-body");
   const startBtn = document.getElementById("start-btn");
@@ -27,6 +31,7 @@
   const TAU = Math.PI * 2;
   const rand = (a, b) => a + Math.random() * (b - a);
   const randInt = (a, b) => Math.floor(rand(a, b + 1));
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
   const dist2 = (ax, ay, bx, by) => { const dx = ax - bx, dy = ay - by; return dx * dx + dy * dy; };
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -96,6 +101,31 @@
   };
 
   // ----------------------------------------------------------------------
+  //  Personajes seleccionables
+  // ----------------------------------------------------------------------
+  const CHARACTERS = [
+    { id: "soldier", name: "Soldado", desc: "Rifle de asalto. Equilibrado y fiable.",
+      body: "#5a6a36", head: "#d8b48a", maxHp: 100, speed: 1.0, primary: "rifle", melee: "knife",
+      pants: "#3c4426", vest: "#43512c", accent: "#2a3019", headgear: "helmet", gear: "#4b572f", hair: "#3a2c1c" },
+    { id: "police", name: "Policía", desc: "Pistola precisa y rápido de pies.",
+      body: "#2a4374", head: "#d8b48a", maxHp: 100, speed: 1.08, primary: "pistol", melee: "knife",
+      pants: "#1b2740", vest: "#22365e", accent: "#ffd24a", headgear: "cap", gear: "#1d2c50", hair: "#2a2018" },
+    { id: "survivor", name: "Superviviente", desc: "Duro de pelar. Bate demoledor.",
+      body: "#8a5a32", head: "#caa07a", maxHp: 130, speed: 0.98, primary: "pistol", melee: "bat",
+      pants: "#4a3a24", vest: null, accent: "#b23a3a", headgear: "bandana", gear: "#b23a3a", hair: "#33261a" },
+    { id: "medic", name: "Médico", desc: "Regenera vida poco a poco.",
+      body: "#e6ebe8", head: "#d8b48a", maxHp: 100, speed: 1.05, primary: "pistol", melee: "knife", regen: 3,
+      pants: "#c9d2cd", vest: "#f3f6f4", accent: "#e23b3b", headgear: "cap", gear: "#f1f4f2", hair: "#3a2c1c" },
+    { id: "swat", name: "SWAT", desc: "Blindado: mucha vida, algo lento.",
+      body: "#2b2f35", head: "#c2a08a", maxHp: 150, speed: 0.85, primary: "rifle", melee: "bat",
+      pants: "#191b1f", vest: "#34393f", accent: "#5b626c", headgear: "helmet", gear: "#1c1f24", hair: "#1a1a1a", visor: true },
+    { id: "hunter", name: "Cazador", desc: "Ágil y veloz. Golpea y corre.",
+      body: "#3d5a32", head: "#caa07a", maxHp: 85, speed: 1.2, primary: "rifle", melee: "knife",
+      pants: "#33472a", vest: "#46663a", accent: "#6a7a45", headgear: "hood", gear: "#2f4426", hair: "#2a2018" },
+  ];
+  let selectedChar = 0;
+
+  // ----------------------------------------------------------------------
   //  Estado global del juego
   // ----------------------------------------------------------------------
   const game = {
@@ -130,36 +160,104 @@
   let dropzone = null;     // punto de entrega del encargo
 
   // ----------------------------------------------------------------------
-  //  Generación de regiones (obstáculos / decoración)
+  //  Generación de regiones — PUEBLO (calles, manzanas, casas, locales, puestos)
   // ----------------------------------------------------------------------
+  const WALL_COLORS = ["#b9a07a", "#c8b48c", "#a98e6a", "#cfc1a0", "#b08f78", "#9fb0b3", "#c5a98f"];
+  const ROOF_COLORS = ["#7a4a3a", "#6b5a48", "#8a5340", "#566a72", "#7d6b50", "#5e4636", "#8a7a4a"];
+  const AWNING_COLORS = ["#c0392b", "#2e7d52", "#2b6ca0", "#c79a2b", "#8e44ad", "#b0563a"];
+  const TOWN_TINTS = ["#3c4a32", "#43492f", "#4a4636", "#3e4738", "#474334"]; // césped/tierra por región
+  const ROAD = 92;   // ancho de calle (transitable)
+  const MARGIN = 92;  // contorno despejado (cubre el punto de entrada al cambiar de región)
+  const SIDEWALK = 10;
+  const ALLEY = 24;
+
   function getRegion(rx, ry) {
     const key = rx + "," + ry;
     if (game.regionCache[key]) return game.regionCache[key];
-
     const rng = mulberry32((rx * 73856093) ^ (ry * 19349663) ^ 0x9e37);
-    const obstacles = [];
-    const n = 3 + Math.floor(rng() * 4);
-    let tries = 0;
-    while (obstacles.length < n && tries < 60) {
-      tries++;
-      const w = 60 + rng() * 180;
-      const h = 60 + rng() * 160;
-      const x = 120 + rng() * (W - 240 - w);
-      const y = 120 + rng() * (H - 240 - h);
-      const rect = { x, y, w, h };
-      // evita que tape el centro de aparición
-      if (dist2(x + w / 2, y + h / 2, W / 2, H / 2) < 160 * 160) continue;
-      let overlap = false;
-      for (const o of obstacles) {
-        if (x < o.x + o.w + 30 && x + w + 30 > o.x && y < o.y + o.h + 30 && y + h + 30 > o.y) { overlap = true; break; }
-      }
-      if (!overlap) obstacles.push(rect);
-    }
-    // tono de terreno según región para distinguir zonas
-    const tint = (rx + ry) % 2 === 0 ? "#20271f" : "#232a26";
-    const data = { obstacles, tint, rng: mulberry32((rx + 1) * 911 + (ry + 1) * 333) };
+    const town = generateTown(rng);
+    const obstacles = [...town.buildings, ...town.stalls]; // sólido para colisión
+    const tint = TOWN_TINTS[(rx * 3 + ry * 5) % TOWN_TINTS.length];
+    const data = { obstacles, town, tint };
     game.regionCache[key] = data;
     return data;
+  }
+
+  function generateTown(rng) {
+    const buildings = [], stalls = [], roads = [];
+    const innerX = MARGIN, innerY = MARGIN;
+    const innerW = W - MARGIN * 2, innerH = H - MARGIN * 2;
+    const cols = clamp(Math.round(innerW / 360), 3, 4);
+    const rows = 1;
+    const blockW = (innerW - (cols - 1) * ROAD) / cols;
+    const blockH = (innerH - (rows - 1) * ROAD) / rows;
+
+    // calles entre manzanas (para dibujar)
+    for (let i = 1; i < cols; i++) roads.push({ x: innerX + i * blockW + (i - 1) * ROAD, y: 0, w: ROAD, h: H, dir: "v" });
+    for (let j = 1; j < rows; j++) roads.push({ x: 0, y: innerY + j * blockH + (j - 1) * ROAD, w: W, h: ROAD, dir: "h" });
+
+    // elige la manzana-plaza (la más cercana al centro de la región)
+    let plaza = null, pd = Infinity;
+    const blocks = [];
+    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+      const bx = innerX + i * (blockW + ROAD), by = innerY + j * (blockH + ROAD);
+      const b = { bx, by, w: blockW, h: blockH, cx: bx + blockW / 2, cy: by + blockH / 2 };
+      const d = Math.hypot(b.cx - W / 2, b.cy - H / 2);
+      blocks.push(b); if (d < pd) { pd = d; plaza = b; }
+    }
+
+    let plazaRect = null;
+    for (const b of blocks) {
+      if (b === plaza) {
+        plazaRect = { x: b.bx, y: b.by, w: b.w, h: b.h };
+        makePlaza(b, stalls, rng);
+      } else {
+        fillBlock(b, buildings, rng);
+      }
+    }
+    return { buildings, stalls, roads, plazaRect };
+  }
+
+  // rellena una manzana con 1-4 edificios dejando acera y callejones
+  function fillBlock(b, buildings, rng) {
+    const nx = b.w > 720 ? 2 : 1;
+    const ny = b.h > 760 ? 2 : 1;
+    const lotW = (b.w - 2 * SIDEWALK - (nx - 1) * ALLEY) / nx;
+    const lotH = (b.h - 2 * SIDEWALK - (ny - 1) * ALLEY) / ny;
+    if (lotW < 70 || lotH < 70) return;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      if (rng() < 0.08) continue; // solar vacío ocasional
+      const x = b.bx + SIDEWALK + i * (lotW + ALLEY);
+      const y = b.by + SIDEWALK + j * (lotH + ALLEY);
+      buildings.push(makeBuilding(x, y, lotW, lotH, rng));
+    }
+  }
+
+  function makeBuilding(x, y, w, h, rng) {
+    const shop = rng() < 0.42;
+    return {
+      x, y, w, h, kind: shop ? "shop" : "house",
+      wall: WALL_COLORS[Math.floor(rng() * WALL_COLORS.length)],
+      roof: ROOF_COLORS[Math.floor(rng() * ROOF_COLORS.length)],
+      awning: shop ? AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)] : null,
+      door: (w > h ? "S" : "E"), // lado de la puerta (sur o este)
+      seed: Math.floor(rng() * 1000),
+    };
+  }
+
+  // plaza con puestos en el borde (centro despejado para aparecer)
+  function makePlaza(b, stalls, rng) {
+    const sw = 56, sh = 58;
+    const spots = [
+      { x: b.bx + 40, y: b.by + 36 }, { x: b.bx + b.w - sw - 40, y: b.by + 36 },
+      { x: b.bx + 40, y: b.by + b.h - sh - 36 }, { x: b.bx + b.w - sw - 40, y: b.by + b.h - sh - 36 },
+      { x: b.cx - sw / 2, y: b.by + 30 }, { x: b.cx - sw / 2, y: b.by + b.h - sh - 30 },
+    ];
+    for (const sp of spots) {
+      if (rng() < 0.3) continue;
+      if (dist2(sp.x + sw / 2, sp.y + sh / 2, W / 2, H / 2) < 150 * 150) continue; // deja el centro libre
+      stalls.push({ x: sp.x, y: sp.y, w: sw, h: sh, awning: AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)] });
+    }
   }
 
   // ----------------------------------------------------------------------
@@ -249,24 +347,32 @@
   // ----------------------------------------------------------------------
   //  Jugador
   // ----------------------------------------------------------------------
-  function makePlayer() {
+  function makePlayer(c) {
+    c = c || CHARACTERS[0];
+    const hasRifle = c.primary === "rifle";
     return {
-      x: W / 2, y: H / 2, r: 16,
-      hp: 100, maxHp: 100,
+      x: W / 2, y: H / 2, r: 16 * SCALE,
+      hp: c.maxHp, maxHp: c.maxHp,
       aim: 0,             // ángulo hacia el ratón
       moveAng: 0,
       walkCycle: 0,
       moving: false, running: false,
       speed: 0,
       slot: 0,            // 0 = principal, 1 = melee
-      weapons: ["pistol", "knife"],
+      weapons: [c.primary, c.melee],
       ammo: { pistol: WEAPONS.pistol.mag, rifle: WEAPONS.rifle.mag },
       reserve: { pistol: 48, rifle: 90 },
       reloading: 0,
       cooldown: 0,
       meleeSwing: 0,      // temporizador de animación de golpe
       hurtFlash: 0,
-      hasRifle: false,
+      hasRifle,
+      bodyColor: c.body,
+      headColor: c.head,
+      speedMul: c.speed,
+      regen: c.regen || 0,
+      charName: c.name,
+      char: c,
     };
   }
 
@@ -275,6 +381,13 @@
   // ----------------------------------------------------------------------
   //  Spawns
   // ----------------------------------------------------------------------
+  // paletas de aspecto de los zombies (tonos apagados y enfermizos, nada de verde chillón)
+  const Z_SKIN = ["#8c9a86", "#9aa39b", "#a8a290", "#7e8a80", "#9b8d83", "#879089", "#92a08a", "#b0a892", "#7f8c92"];
+  const Z_SHIRT = ["#39495a", "#5a4636", "#45454e", "#6a3a3a", "#384a44", "#4a3a52", "#5a554f", "#2f3a46", "#6a5a3a", "#46303a"];
+  const Z_PANTS = ["#2c333a", "#3a2e22", "#33333a", "#402a2a", "#283330", "#332a3a", "#3c3630"];
+  const Z_HAIR = ["#2a2018", "#1c1c1c", "#3a2c1c", "#4a4a4a", "#5a4632", "#6a6a66"];
+  const Z_EYE = ["#c24a3a", "#caa23a", "#9a3a3a", "#d8d2b0", "#b86a2a"];
+
   function spawnZombie() {
     // aparece desde un borde de la pantalla
     const side = randInt(0, 3);
@@ -287,21 +400,30 @@
     let z = {
       x, y, r: 15, hp: 60, maxHp: 60, speed: rand(55, 80),
       dmg: 12, atkCd: 0, hurt: 0, walkCycle: rand(0, TAU),
-      aim: 0, type: "normal", color: "#6f8f4a",
+      aim: 0, type: "normal",
     };
     // zombies más fuertes en oleadas avanzadas
     if (game.wave >= 3 && tier > 0.78) {
-      z = Object.assign(z, { hp: 150, maxHp: 150, r: 20, speed: rand(40, 58), dmg: 22, type: "brute", color: "#4f7a3a" });
+      z = Object.assign(z, { hp: 150, maxHp: 150, r: 20, speed: rand(40, 58), dmg: 22, type: "brute" });
     } else if (tier > 0.6) {
-      z = Object.assign(z, { hp: 45, maxHp: 45, r: 13, speed: rand(95, 125), dmg: 8, type: "runner", color: "#8aa85a" });
+      z = Object.assign(z, { hp: 45, maxHp: 45, r: 13, speed: rand(95, 125), dmg: 8, type: "runner" });
     }
     z.hp += game.wave * 6; z.maxHp = z.hp;
+    z.r *= SCALE;
+    // aspecto aleatorio (piel putrefacta, ropa desgarrada, pelo, ojos, herida)
+    z.skin = pick(Z_SKIN);
+    z.shirt = pick(Z_SHIRT);
+    z.pants = pick(Z_PANTS);
+    z.hair = z.type === "brute" ? (Math.random() < 0.5 ? pick(Z_HAIR) : null) : (Math.random() < 0.8 ? pick(Z_HAIR) : null);
+    z.eye = pick(Z_EYE);
+    z.wound = { x: rand(-4, 5), y: rand(-5, 5), r: rand(2, 3.4) };
+    z.gore = Math.random() < 0.5; // mancha de sangre extra
     zombies.push(z);
   }
 
   function spawnGuard(x, y, anchor) {
     enemies.push({
-      x, y, r: 16, hp: 90, maxHp: 90, speed: 70,
+      x, y, r: 16 * SCALE, hp: 90, maxHp: 90, speed: 70,
       aim: 0, fireCd: rand(0.5, 1.5), state: "idle",
       walkCycle: rand(0, TAU), hurt: 0, dmg: 14,
       strafeDir: Math.random() < 0.5 ? 1 : -1, // lado por el que rodea la cobertura
@@ -324,7 +446,7 @@
   // perro de ataque: rápido, cuerpo a cuerpo, acompaña a los guardias
   function spawnDog(x, y, anchor) {
     dogs.push({
-      x, y, r: 11, hp: 42, maxHp: 42, speed: rand(155, 200),
+      x, y, r: 11 * SCALE, hp: 42, maxHp: 42, speed: rand(155, 200),
       dmg: 9, atkCd: 0, aim: rand(0, TAU), walkCycle: rand(0, TAU),
       hurt: 0, moving: true,
       anchor: anchor || null,
@@ -349,8 +471,8 @@
 
   function dropLoot(x, y) {
     const r = Math.random();
-    if (r < 0.18) pickups.push({ x, y, type: "health", r: 12, t: 0 });
-    else if (r < 0.5) pickups.push({ x, y, type: "ammo", r: 12, t: 0 });
+    if (r < 0.18) pickups.push({ x, y, type: "health", r: 16, t: 0 });
+    else if (r < 0.5) pickups.push({ x, y, type: "ammo", r: 16, t: 0 });
   }
 
   // ----------------------------------------------------------------------
@@ -475,7 +597,7 @@
   // ----------------------------------------------------------------------
   //  Cambio de región al tocar los bordes de la pantalla
   // ----------------------------------------------------------------------
-  const INSET = 78; // a qué distancia del borde entras a la nueva región (deja sitio detrás)
+  const INSET = 58; // a qué distancia del borde entras a la nueva región (deja sitio detrás)
 
   function checkRegionSwitch() {
     // posición y región previas (para el seguimiento natural y el anclaje de guardias)
@@ -603,15 +725,15 @@
       for (let i = 0; i < w.bullets; i++) {
         const a = player.aim + rand(-w.spread, w.spread);
         bullets.push({
-          x: player.x + Math.cos(player.aim) * 22,
-          y: player.y + Math.sin(player.aim) * 22,
+          x: player.x + Math.cos(player.aim) * 22 * SCALE,
+          y: player.y + Math.sin(player.aim) * 22 * SCALE,
           vx: Math.cos(a) * w.speed, vy: Math.sin(a) * w.speed,
-          dmg: w.dmg, life: 0.9, color: w.color, r: 3,
+          dmg: w.dmg, life: 0.9, color: w.color, r: 3.5,
         });
       }
       player.ammo[key]--;
       player.cooldown = w.rate;
-      spawnParticles(player.x + Math.cos(player.aim) * 26, player.y + Math.sin(player.aim) * 26, "#ffcf5a", 4, 120);
+      spawnParticles(player.x + Math.cos(player.aim) * 26 * SCALE, player.y + Math.sin(player.aim) * 26 * SCALE, "#ffcf5a", 4, 120);
     } else {
       // melee
       if (!(mouse.rdown || keys["Space"])) return;
@@ -760,7 +882,7 @@
 
     player.moving = dx !== 0 || dy !== 0;
     player.running = player.moving && (keys["ShiftLeft"] || keys["ShiftRight"]);
-    const base = (player.running ? 235 : 150) * (game.carrying ? 0.78 : 1);
+    const base = (player.running ? 235 : 150) * (game.carrying ? 0.78 : 1) * player.speedMul;
 
     if (player.moving) {
       const len = Math.hypot(dx, dy);
@@ -787,6 +909,7 @@
     if (player.cooldown > 0) player.cooldown -= dt;
     if (player.meleeSwing > 0) player.meleeSwing -= dt;
     if (player.hurtFlash > 0) player.hurtFlash -= dt;
+    if (player.regen && player.hp < player.maxHp) player.hp = clamp(player.hp + player.regen * dt, 0, player.maxHp);
     if (player.reloading > 0) {
       player.reloading -= dt;
       if (player.reloading <= 0) finishReload();
@@ -876,16 +999,16 @@
         e.fireCd = rand(0.9, 1.7);
         const a = e.aim + rand(-0.08, 0.08);
         ebullets.push({
-          x: e.x + Math.cos(e.aim) * 20, y: e.y + Math.sin(e.aim) * 20,
+          x: e.x + Math.cos(e.aim) * 20 * SCALE, y: e.y + Math.sin(e.aim) * 20 * SCALE,
           vx: Math.cos(a) * 560, vy: Math.sin(a) * 560,
-          dmg: e.dmg, life: 1.1, r: 3.5,
+          dmg: e.dmg, life: 1.1, r: 4,
         });
-        spawnParticles(e.x + Math.cos(e.aim) * 22, e.y + Math.sin(e.aim) * 22, "#ff9a4a", 3, 100);
+        spawnParticles(e.x + Math.cos(e.aim) * 22 * SCALE, e.y + Math.sin(e.aim) * 22 * SCALE, "#ff9a4a", 3, 100);
       }
 
       if (e.hp <= 0) {
         spawnParticles(e.x, e.y, "#7a3020", 16, 220);
-        if (Math.random() < 0.6) pickups.push({ x: e.x, y: e.y, type: "ammo", r: 12, t: 0 });
+        if (Math.random() < 0.6) pickups.push({ x: e.x, y: e.y, type: "ammo", r: 16, t: 0 });
         game.score += 80;
         enemies.splice(i, 1);
       }
@@ -914,7 +1037,7 @@
 
       if (d.hp <= 0) {
         spawnParticles(d.x, d.y, "#7a3020", 12, 180);
-        if (Math.random() < 0.3) pickups.push({ x: d.x, y: d.y, type: "ammo", r: 12, t: 0 });
+        if (Math.random() < 0.3) pickups.push({ x: d.x, y: d.y, type: "ammo", r: 16, t: 0 });
         game.score += 40;
         dogs.splice(i, 1);
       }
@@ -992,7 +1115,7 @@
   function draw() {
     ctx.clearRect(0, 0, W, H);
     drawGround();
-    drawObstacles();
+    drawTown();
     if (game.state === "mission" && encargo && inRegion(game.mission.px, game.mission.py)) drawEncargo();
     if (game.state === "mission" && dropzone && inRegion(game.mission.dx, game.mission.dy)) drawDropzone();
     drawPickups();
@@ -1012,32 +1135,157 @@
     const reg = getRegion(game.region.x, game.region.y);
     ctx.fillStyle = reg.tint;
     ctx.fillRect(0, 0, W, H);
-    // rejilla sutil
-    ctx.strokeStyle = "rgba(255,255,255,0.03)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = 0; x <= W; x += 80) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
-    for (let y = 0; y <= H; y += 80) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
-    ctx.stroke();
-    // borde de la región (indica los límites donde se cambia de zona)
-    ctx.strokeStyle = "rgba(120,180,90,0.18)";
+    // textura de césped: motas sutiles deterministas
+    const r2 = mulberry32((game.region.x + 7) * 101 + (game.region.y + 3) * 53);
+    ctx.fillStyle = "rgba(0,0,0,0.06)";
+    for (let i = 0; i < 90; i++) {
+      const x = r2() * W, y = r2() * H, s = 2 + r2() * 4;
+      ctx.fillRect(x, y, s, s);
+    }
+    ctx.fillStyle = "rgba(255,255,255,0.025)";
+    for (let i = 0; i < 60; i++) ctx.fillRect(r2() * W, r2() * H, 2, 2);
+    // borde de la región (límite donde se cambia de zona)
+    ctx.strokeStyle = "rgba(120,180,90,0.16)";
     ctx.lineWidth = 6;
     ctx.strokeRect(3, 3, W - 6, H - 6);
   }
 
-  function drawObstacles() {
-    const obs = getRegion(game.region.x, game.region.y).obstacles;
-    for (const o of obs) {
-      ctx.fillStyle = "#11160f";
-      ctx.fillRect(o.x + 5, o.y + 6, o.w, o.h); // sombra
-      ctx.fillStyle = "#39432f";
-      ctx.fillRect(o.x, o.y, o.w, o.h);
-      ctx.fillStyle = "#4a5740";
-      ctx.fillRect(o.x, o.y, o.w, 10);
-      ctx.strokeStyle = "#222a1c";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(o.x, o.y, o.w, o.h);
+  function drawTown() {
+    const t = getRegion(game.region.x, game.region.y).town;
+    for (const r of t.roads) drawRoad(r);
+    if (t.plazaRect) drawPlaza(t.plazaRect);
+    for (const b of t.buildings) drawBuilding(b);
+    for (const s of t.stalls) drawStall(s);
+  }
+
+  function drawRoad(r) {
+    // asfalto
+    ctx.fillStyle = "#34373a";
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    // aceras (bordes claros)
+    ctx.fillStyle = "#6c6f6a";
+    if (r.dir === "v") {
+      ctx.fillRect(r.x - 4, r.y, 4, r.h); ctx.fillRect(r.x + r.w, r.y, 4, r.h);
+    } else {
+      ctx.fillRect(r.x, r.y - 4, r.w, 4); ctx.fillRect(r.x, r.y + r.h, r.w, 4);
     }
+    // línea discontinua central
+    ctx.strokeStyle = "rgba(230,210,120,0.55)";
+    ctx.lineWidth = 3; ctx.setLineDash([16, 16]);
+    ctx.beginPath();
+    if (r.dir === "v") { ctx.moveTo(r.x + r.w / 2, r.y); ctx.lineTo(r.x + r.w / 2, r.y + r.h); }
+    else { ctx.moveTo(r.x, r.y + r.h / 2); ctx.lineTo(r.x + r.w, r.y + r.h / 2); }
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+
+  function drawPlaza(p) {
+    ctx.fillStyle = "#8a8278";
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    // baldosas
+    ctx.strokeStyle = "rgba(0,0,0,0.10)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = p.x; x <= p.x + p.w; x += 28) { ctx.moveTo(x, p.y); ctx.lineTo(x, p.y + p.h); }
+    for (let y = p.y; y <= p.y + p.h; y += 28) { ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); }
+    ctx.stroke();
+    // fuente central decorativa (salvo si cae sobre el punto de aparición)
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    if (dist2(cx, cy, W / 2, H / 2) < 80 * 80) return;
+    ctx.fillStyle = "#6f7d86"; ctx.beginPath(); ctx.arc(cx, cy, 22, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#3f5d6e"; ctx.beginPath(); ctx.arc(cx, cy, 14, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#7fb0c4"; ctx.beginPath(); ctx.arc(cx, cy, 6, 0, TAU); ctx.fill();
+  }
+
+  function drawBuilding(b) {
+    const x = b.x, y = b.y, w = b.w, h = b.h;
+    // acera bajo el edificio
+    ctx.fillStyle = "#7a7d76";
+    roundRectPath(x - 8, y - 8, w + 16, h + 16, 6); ctx.fill();
+    // sombra proyectada
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    roundRectPath(x + 5, y + 6, w, h, 4); ctx.fill();
+    // muros
+    ctx.fillStyle = b.wall;
+    roundRectPath(x, y, w, h, 4); ctx.fill();
+    // tejado (interior, deja banda de muro con ventanas)
+    const I = 14;
+    ctx.fillStyle = b.roof;
+    roundRectPath(x + I, y + I, w - 2 * I, h - 2 * I, 3); ctx.fill();
+    if (b.kind === "house") {
+      // caballete del tejado a lo largo del lado mayor + aguas
+      ctx.strokeStyle = "rgba(255,255,255,0.13)"; ctx.lineWidth = 3;
+      ctx.beginPath();
+      if (w >= h) { ctx.moveTo(x + I + 6, y + h / 2); ctx.lineTo(x + w - I - 6, y + h / 2); }
+      else { ctx.moveTo(x + w / 2, y + I + 6); ctx.lineTo(x + w / 2, y + h - I - 6); }
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 2;
+      ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
+      // chimenea
+      ctx.fillStyle = "#4a3a30"; ctx.fillRect(x + w - I - 18, y + I + 8, 12, 12);
+    } else {
+      // local: tejado plano con unidad de aire y parapeto
+      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 3;
+      ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
+      ctx.fillStyle = "#5a5f63"; ctx.fillRect(x + w / 2 - 11, y + h / 2 - 8, 22, 16);
+      ctx.fillStyle = "#474b4e"; ctx.fillRect(x + w / 2 - 8, y + h / 2 - 5, 7, 10);
+    }
+    // ventanas en la banda de muro
+    drawWindows(b, I);
+    // puerta + toldo (locales) en su lado
+    drawDoor(b);
+  }
+
+  function drawWindows(b, I) {
+    const x = b.x, y = b.y, w = b.w, h = b.h;
+    const win = (wx, wy, ww, wh) => {
+      ctx.fillStyle = "#cfe6ee"; ctx.fillRect(wx, wy, ww, wh);
+      ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 1; ctx.strokeRect(wx, wy, ww, wh);
+    };
+    const nH = Math.max(1, Math.floor((w - 44) / 50));
+    const nV = Math.max(1, Math.floor((h - 44) / 50));
+    for (let i = 0; i < nH; i++) {
+      const wx = x + 22 + i * ((w - 44) / nH) + ((w - 44) / nH - 14) / 2;
+      win(wx, y + 3.5, 14, 7); win(wx, y + h - 10.5, 14, 7);
+    }
+    for (let j = 0; j < nV; j++) {
+      const wy = y + 22 + j * ((h - 44) / nV) + ((h - 44) / nV - 14) / 2;
+      win(x + 3.5, wy, 7, 14); win(x + w - 10.5, wy, 7, 14);
+    }
+  }
+
+  function drawDoor(b) {
+    const x = b.x, y = b.y, w = b.w, h = b.h;
+    ctx.fillStyle = "#3a2a1c";
+    if (b.door === "S") {
+      const dx = x + w / 2 - 11;
+      ctx.fillRect(dx, y + h - 9, 22, 9);
+      if (b.awning) { ctx.fillStyle = b.awning; ctx.fillRect(dx - 9, y + h - 1, 40, 11); drawStripes(dx - 9, y + h - 1, 40, 11); }
+    } else {
+      const dy = y + h / 2 - 11;
+      ctx.fillRect(x + w - 9, dy, 9, 22);
+      if (b.awning) { ctx.fillStyle = b.awning; ctx.fillRect(x + w - 1, dy - 9, 11, 40); drawStripes(x + w - 1, dy - 9, 11, 40); }
+    }
+  }
+
+  function drawStripes(x, y, w, h) {
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    if (w > h) for (let i = x; i < x + w; i += 8) ctx.fillRect(i, y, 4, h);
+    else for (let i = y; i < y + h; i += 8) ctx.fillRect(x, i, w, 4);
+    ctx.restore();
+  }
+
+  function drawStall(s) {
+    // puesto de mercado: mesa + toldo a rayas
+    ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.fillRect(s.x + 4, s.y + 5, s.w, s.h);
+    ctx.fillStyle = "#7a5a38"; ctx.fillRect(s.x, s.y + s.h - 15, s.w, 15); // mesa
+    ctx.fillStyle = "#caa15a"; ctx.fillRect(s.x + 3, s.y + s.h - 12, s.w - 6, 6); // género
+    ctx.fillStyle = "#b0563a"; ctx.fillRect(s.x + 6, s.y + s.h - 11, 6, 4);
+    ctx.fillStyle = "#2e7d52"; ctx.fillRect(s.x + s.w - 14, s.y + s.h - 11, 6, 4);
+    ctx.fillStyle = s.awning; ctx.fillRect(s.x - 3, s.y, s.w + 6, 13); // toldo
+    drawStripes(s.x - 3, s.y, s.w + 6, 13);
+    ctx.fillStyle = "#5e4630"; // postes
+    ctx.fillRect(s.x, s.y + 12, 4, s.h - 20); ctx.fillRect(s.x + s.w - 4, s.y + 12, 4, s.h - 20);
   }
 
   function drawEncargo() {
@@ -1097,6 +1345,7 @@
       const bob = Math.sin(p.t * 4) * 3;
       ctx.save();
       ctx.translate(p.x, p.y + bob);
+      ctx.scale(SCALE, SCALE);
       if (p.type === "health") {
         ctx.fillStyle = "#1c2a1c"; ctx.fillRect(-9, -9, 18, 18);
         ctx.fillStyle = "#6fe06f";
@@ -1178,14 +1427,156 @@
     ctx.restore();
   }
 
+  // trazo de rectángulo redondeado reutilizable
+  function roundRectPath(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // pierna con bota al final
+  function drawBootLeg(bx, by, reach, legCol, bootCol) {
+    const ex = bx + reach;
+    ctx.strokeStyle = legCol; ctx.lineWidth = 6; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(ex, by); ctx.stroke();
+    ctx.fillStyle = bootCol;
+    ctx.beginPath(); ctx.ellipse(ex + 2, by, 4, 3.2, 0, 0, TAU); ctx.fill();
+  }
+
+  // arma detallada en el marco local del personaje (+x = frente)
+  function drawWeaponDetailed(o, key, w) {
+    if (w.type === "ranged") {
+      if (key === "rifle") {
+        ctx.fillStyle = "#2c2c2e"; roundRectPath(5, -3, 15, 6, 1.6); ctx.fill();
+        ctx.fillStyle = "#191919"; ctx.fillRect(19, -1.5, 15, 3);   // cañón
+        ctx.fillStyle = "#3a3a3c"; ctx.fillRect(1, -2, 6, 4);        // culata
+        ctx.fillStyle = "#161616"; ctx.fillRect(11, 3, 4, 7);        // cargador
+        ctx.fillStyle = "#444"; ctx.fillRect(12, -5, 2, 2);          // mira
+      } else {
+        ctx.fillStyle = "#303033"; roundRectPath(8, -2.5, 9, 5, 1.4); ctx.fill();
+        ctx.fillStyle = "#191919"; ctx.fillRect(16, -1.2, 6, 2.4);   // cañón
+        ctx.fillStyle = "#454548"; ctx.fillRect(8, 2, 3, 6);         // empuñadura
+      }
+    } else {
+      const s = o.meleeSwing > 0 ? (1 - o.meleeSwing / 0.22) : 0;
+      ctx.save();
+      ctx.rotate(lerp(-0.5, 0.7, s));
+      if (key === "bat") {
+        ctx.fillStyle = "#6b4a2a"; ctx.fillRect(8, -2, 7, 4);        // mango
+        ctx.fillStyle = "#caa15a"; roundRectPath(15, -3.6, 18, 7.2, 3); ctx.fill();
+        ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.fillRect(20, -3, 2, 6);
+      } else {
+        ctx.fillStyle = "#5e3f1c"; ctx.fillRect(10, -1.6, 6, 3.2);   // mango
+        ctx.fillStyle = "#d8dde0";
+        ctx.beginPath(); ctx.moveTo(16, -2.2); ctx.lineTo(27, 0); ctx.lineTo(16, 2.2); ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // cabeza con tocado caracterizado
+  function drawHead(o, c, F) {
+    const hx = 5;
+    // cabeza (piel)
+    ctx.fillStyle = F(c.head);
+    ctx.beginPath(); ctx.arc(hx, 0, 7, 0, TAU); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.08)";
+    ctx.beginPath(); ctx.arc(hx - 1, 2, 6.4, 0, TAU); ctx.fill();
+
+    const g = c.headgear;
+    if (g === "cap" || g === "helmet") {
+      if (g === "cap") { ctx.fillStyle = F(c.gear); roundRectPath(hx + 4, -4.5, 7, 9, 2.5); ctx.fill(); }
+      ctx.fillStyle = F(c.gear);
+      ctx.beginPath(); ctx.arc(hx - 1.8, 0, 7.4, 0, TAU); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.12)";
+      ctx.beginPath(); ctx.arc(hx - 3, -2.5, 3, 0, TAU); ctx.fill();
+      if (c.accent && g === "cap") { ctx.fillStyle = F(c.accent); ctx.fillRect(hx + 0.5, -2, 3, 4); }
+      if (c.visor) { ctx.fillStyle = "rgba(15,22,30,0.92)"; roundRectPath(hx + 2.5, -5, 4.5, 10, 2); ctx.fill(); }
+    } else if (g === "hood") {
+      ctx.fillStyle = F(c.gear);
+      ctx.beginPath(); ctx.arc(hx - 2.5, 0, 9, 0, TAU); ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.beginPath(); ctx.arc(hx - 0.5, 0, 7, 0, TAU); ctx.fill();
+      ctx.fillStyle = F(c.head);
+      ctx.beginPath(); ctx.arc(hx + 2, 0, 5, 0, TAU); ctx.fill();
+    } else if (g === "bandana") {
+      ctx.fillStyle = F(c.hair);
+      ctx.beginPath(); ctx.arc(hx - 2.2, 0, 7.2, 0, TAU); ctx.fill();
+      ctx.fillStyle = F(c.accent); roundRectPath(hx - 1, -7.2, 4, 14.4, 1.5); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(hx - 5, 4); ctx.lineTo(hx - 12, 7); ctx.lineTo(hx - 5, 8); ctx.closePath(); ctx.fill();
+    } else {
+      ctx.fillStyle = F(c.hair);
+      ctx.beginPath(); ctx.arc(hx - 2.2, 0, 7.2, 0, TAU); ctx.fill();
+    }
+    // nariz (indica el frente)
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath(); ctx.arc(hx + 6.4, 0, 1.2, 0, TAU); ctx.fill();
+  }
+
+  // render detallado del personaje del jugador
+  function drawCharacter(o, c, w) {
+    const swing = Math.sin(o.walkCycle) * (o.moving ? 1 : 0);
+    const flash = o.hurtFlash > 0;
+    const F = (col) => (flash ? "#ffffff" : col);
+    const key = o.weapons[o.slot];
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    ctx.scale(SCALE, SCALE);
+    // sombra
+    ctx.fillStyle = "rgba(0,0,0,0.32)";
+    ctx.beginPath(); ctx.ellipse(0, 7, 17, 9, 0, 0, TAU); ctx.fill();
+    ctx.rotate(o.aim);
+
+    // piernas + botas
+    drawBootLeg(-2, -7, swing * 8, F(c.pants), F("#15110b"));
+    drawBootLeg(-2, 7, -swing * 8, F(c.pants), F("#15110b"));
+
+    // brazo trasero (detrás del torso)
+    ctx.strokeStyle = F(c.body); ctx.lineWidth = 7; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(1, 8); ctx.lineTo(13, 5); ctx.stroke();
+
+    // torso
+    ctx.fillStyle = F(c.body);
+    ctx.beginPath(); ctx.ellipse(0, 0, 13, 11.5, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.beginPath(); ctx.ellipse(2, -3, 9, 6, 0, 0, TAU); ctx.fill();
+
+    // chaleco
+    if (c.vest) {
+      ctx.fillStyle = F(c.vest); roundRectPath(-7, -8, 13, 16, 4); ctx.fill();
+      ctx.strokeStyle = F(c.accent); ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(-2, -7.5); ctx.lineTo(-2, 7.5); ctx.stroke();
+      ctx.fillStyle = "rgba(0,0,0,0.26)";
+      ctx.fillRect(-6, -6, 4, 4); ctx.fillRect(-6, 2.2, 4, 4);
+    }
+    // emblema (cruz médica)
+    if (c.id === "medic") {
+      ctx.fillStyle = F(c.accent);
+      ctx.fillRect(-2.5, -1.6, 5, 3.2); ctx.fillRect(-1.1, -3, 2.2, 6);
+    }
+
+    // arma
+    drawWeaponDetailed(o, key, w);
+
+    // brazo delantero + mano
+    ctx.strokeStyle = F(c.body); ctx.lineWidth = 7; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(1, -8); ctx.lineTo(15, -3); ctx.stroke();
+    ctx.fillStyle = F(c.head);
+    ctx.beginPath(); ctx.arc(15, -3, 2.6, 0, TAU); ctx.fill();
+
+    // cabeza
+    drawHead(o, c, F);
+
+    ctx.restore();
+  }
+
   function drawPlayer() {
     const w = currentWeapon();
-    drawHumanoid(player, {
-      bodyColor: "#3f6fae",
-      headColor: "#d8b48a",
-      scale: 1,
-      weapon: w.type === "ranged" ? "ranged" : "melee",
-    });
+    drawCharacter(player, player.char, w);
 
     // arco de golpe melee
     if (w.type === "melee" && player.meleeSwing > 0) {
@@ -1230,14 +1621,75 @@
 
   function drawZombies() {
     for (const z of zombies) {
-      drawHumanoid(z, { bodyColor: z.color, headColor: "#86a35a", scale: z.r / 15, weapon: null });
+      drawZombie(z);
       drawHealthBar(z);
     }
   }
 
+  // render detallado y caracterizado del zombi (vista cenital, +x = frente)
+  function drawZombie(z) {
+    const s = z.r / 15;
+    const swing = Math.sin(z.walkCycle);
+    const flash = z.hurt > 0;
+    const F = (c) => (flash ? "#ffffff" : c);
+    ctx.save();
+    ctx.translate(z.x, z.y);
+    ctx.scale(s, s);
+    // sombra
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath(); ctx.ellipse(0, 6, 15, 8, 0, 0, TAU); ctx.fill();
+    ctx.rotate(z.aim);
+
+    // piernas (zancada irregular)
+    ctx.strokeStyle = F(z.pants); ctx.lineWidth = 6; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(-3, -6); ctx.lineTo(-3 + swing * 7, -6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-3, 6); ctx.lineTo(-3 - swing * 7, 6); ctx.stroke();
+
+    // brazos extendidos hacia adelante (pose zombi)
+    ctx.strokeStyle = F(z.skin); ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(2, -8); ctx.lineTo(19 + swing * 1.5, -5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(2, 8); ctx.lineTo(19 - swing * 1.5, 5); ctx.stroke();
+    ctx.fillStyle = F(z.skin);
+    ctx.beginPath(); ctx.arc(20 + swing * 1.5, -5, 2.6, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(20 - swing * 1.5, 5, 2.6, 0, TAU); ctx.fill();
+
+    // torso (camisa desgarrada)
+    ctx.fillStyle = F(z.shirt);
+    ctx.beginPath(); ctx.ellipse(0, 0, 12, 10.5, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.14)";
+    ctx.beginPath(); ctx.ellipse(-1, 2, 9, 6, 0, 0, TAU); ctx.fill();
+    // jirón con piel/carne expuesta
+    ctx.fillStyle = F(z.skin);
+    ctx.beginPath(); ctx.moveTo(-2, -8); ctx.lineTo(4, -3); ctx.lineTo(-1, 3); ctx.lineTo(-6, -2); ctx.closePath(); ctx.fill();
+    // herida sangrante
+    ctx.fillStyle = F("#5e1414");
+    ctx.beginPath(); ctx.arc(z.wound.x, z.wound.y, z.wound.r, 0, TAU); ctx.fill();
+    if (z.gore) { ctx.fillStyle = "rgba(120,20,20,0.5)"; ctx.beginPath(); ctx.arc(z.wound.x - 3, z.wound.y + 2, z.wound.r * 0.7, 0, TAU); ctx.fill(); }
+
+    // cabeza
+    ctx.fillStyle = F(z.skin);
+    ctx.beginPath(); ctx.arc(5, 0, 7, 0, TAU); ctx.fill();
+    // pelo (parche trasero)
+    if (z.hair) {
+      ctx.fillStyle = F(z.hair);
+      ctx.beginPath(); ctx.arc(2.5, 0, 7, 0, TAU); ctx.fill();
+      ctx.fillStyle = F(z.skin);
+      ctx.beginPath(); ctx.arc(6.5, 0, 5.6, 0, TAU); ctx.fill(); // cara al frente
+    }
+    // sombra de la mandíbula / boca
+    ctx.fillStyle = "rgba(0,0,0,0.38)";
+    ctx.fillRect(10, -1.6, 2.6, 3.2);
+    // ojos brillantes al frente
+    ctx.fillStyle = flash ? "#000" : F(z.eye);
+    ctx.beginPath(); ctx.arc(8.2, -2.4, 1.3, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(8.2, 2.4, 1.3, 0, TAU); ctx.fill();
+
+    ctx.restore();
+  }
+
   function drawEnemies() {
     for (const e of enemies) {
-      drawHumanoid(e, { bodyColor: "#8a3a3a", headColor: "#c99", scale: 1, weapon: "ranged" });
+      drawHumanoid(e, { bodyColor: "#8a3a3a", headColor: "#c99", scale: e.r / 16, weapon: "ranged" });
       drawHealthBar(e);
     }
   }
@@ -1247,6 +1699,7 @@
       const swing = Math.sin(d.walkCycle);
       ctx.save();
       ctx.translate(d.x, d.y);
+      ctx.scale(d.r / 11, d.r / 11);
       ctx.fillStyle = "rgba(0,0,0,0.3)";
       ctx.beginPath(); ctx.ellipse(0, 5, 13, 6, 0, 0, TAU); ctx.fill();
       ctx.rotate(d.aim);
@@ -1503,7 +1956,7 @@
     game.regionCache = {};
     game.region = { x: 0, y: 0 };
     game.score = 0;
-    player = makePlayer();
+    player = makePlayer(CHARACTERS[selectedChar]);
     zombies = []; enemies = []; dogs = []; pending = []; bullets = []; ebullets = []; particles = []; pickups = [];
     encargo = null; dropzone = null; game.stash = {}; game.carrying = false;
     startWave(1);
@@ -1513,6 +1966,111 @@
     overlayBody.innerHTML = "";
     startGame();
   });
+
+  // ----------------------------------------------------------------------
+  //  Selección de personaje (menú)
+  // ----------------------------------------------------------------------
+  function buildCharSelect() {
+    const cont = document.getElementById("char-select");
+    if (!cont) return;
+    cont.innerHTML = "";
+    CHARACTERS.forEach((c, i) => {
+      const card = document.createElement("div");
+      card.className = "char-card" + (i === selectedChar ? " sel" : "");
+      const cv = document.createElement("canvas");
+      cv.width = 72; cv.height = 64;
+      card.appendChild(cv);
+      const speedTag = c.speed >= 1.12 ? "Veloz" : c.speed <= 0.9 ? "Lento" : "Normal";
+      const extra = c.regen ? " · Regenera" : "";
+      card.insertAdjacentHTML("beforeend",
+        `<div class="cn">${c.name}</div>
+         <div class="cs">❤ ${c.maxHp} · ${WEAPONS[c.primary].name}</div>
+         <div class="cd">${c.desc}<br>${speedTag}${extra}</div>`);
+      card.addEventListener("click", () => {
+        selectedChar = i;
+        cont.querySelectorAll(".char-card").forEach(el => el.classList.remove("sel"));
+        card.classList.add("sel");
+      });
+      cont.appendChild(card);
+      drawCharPreview(cv, c);
+    });
+  }
+
+  // dibuja una miniatura detallada del personaje (vista cenital, mirando hacia abajo)
+  function drawCharPreview(cv, c) {
+    const x = cv.getContext("2d");
+    x.clearRect(0, 0, cv.width, cv.height);
+    const cx = cv.width / 2, cy = cv.height / 2 + 2;
+    const rr = (X, Y, W, H, R) => {
+      x.beginPath(); x.moveTo(X + R, Y);
+      x.arcTo(X + W, Y, X + W, Y + H, R); x.arcTo(X + W, Y + H, X, Y + H, R);
+      x.arcTo(X, Y + H, X, Y, R); x.arcTo(X, Y, X + W, Y, R); x.closePath();
+    };
+    x.fillStyle = "rgba(0,0,0,0.3)";
+    x.beginPath(); x.ellipse(cx, cy + 15, 15, 7, 0, 0, TAU); x.fill();
+    x.save();
+    x.translate(cx, cy);
+    x.rotate(Math.PI / 2); // mira hacia abajo
+
+    // piernas + botas
+    x.strokeStyle = c.pants; x.lineWidth = 5; x.lineCap = "round";
+    x.beginPath(); x.moveTo(-3, -6); x.lineTo(5, -6); x.moveTo(-3, 6); x.lineTo(5, 6); x.stroke();
+    x.fillStyle = "#15110b";
+    x.beginPath(); x.ellipse(7, -6, 3.4, 2.7, 0, 0, TAU); x.fill();
+    x.beginPath(); x.ellipse(7, 6, 3.4, 2.7, 0, 0, TAU); x.fill();
+    // cuerpo
+    x.fillStyle = c.body; x.beginPath(); x.ellipse(0, 0, 13, 11, 0, 0, TAU); x.fill();
+    x.fillStyle = "rgba(255,255,255,0.1)"; x.beginPath(); x.ellipse(2, -3, 8, 5, 0, 0, TAU); x.fill();
+    // chaleco / emblema
+    if (c.vest) { x.fillStyle = c.vest; rr(-7, -8, 13, 16, 4); x.fill(); }
+    if (c.id === "medic") { x.fillStyle = c.accent; x.fillRect(-2.5, -1.6, 5, 3.2); x.fillRect(-1.1, -3, 2.2, 6); }
+    // arma
+    if (WEAPONS[c.primary].type === "ranged") {
+      if (c.primary === "rifle") { x.fillStyle = "#2c2c2e"; rr(5, -3, 15, 6, 1.6); x.fill(); x.fillStyle = "#191919"; x.fillRect(19, -1.5, 11, 3); }
+      else { x.fillStyle = "#303033"; rr(8, -2.5, 9, 5, 1.4); x.fill(); x.fillStyle = "#191919"; x.fillRect(16, -1.2, 6, 2.4); }
+    } else if (c.melee === "bat") {
+      x.fillStyle = "#6b4a2a"; x.fillRect(8, -2, 7, 4); x.fillStyle = "#caa15a"; rr(15, -3.6, 15, 7.2, 3); x.fill();
+    } else {
+      x.fillStyle = "#5e3f1c"; x.fillRect(10, -1.6, 6, 3.2); x.fillStyle = "#d8dde0";
+      x.beginPath(); x.moveTo(16, -2.2); x.lineTo(25, 0); x.lineTo(16, 2.2); x.closePath(); x.fill();
+    }
+    // cabeza + tocado
+    const hx = 4;
+    x.fillStyle = c.head; x.beginPath(); x.arc(hx, 0, 7, 0, TAU); x.fill();
+    const g = c.headgear;
+    if (g === "cap" || g === "helmet") {
+      if (g === "cap") { x.fillStyle = c.gear; rr(hx + 4, -4.5, 7, 9, 2.5); x.fill(); }
+      x.fillStyle = c.gear; x.beginPath(); x.arc(hx - 1.8, 0, 7.4, 0, TAU); x.fill();
+      if (c.visor) { x.fillStyle = "rgba(15,22,30,0.92)"; rr(hx + 2.5, -5, 4.5, 10, 2); x.fill(); }
+      else if (c.accent && g === "cap") { x.fillStyle = c.accent; x.fillRect(hx + 0.5, -2, 3, 4); }
+    } else if (g === "hood") {
+      x.fillStyle = c.gear; x.beginPath(); x.arc(hx - 2.5, 0, 9, 0, TAU); x.fill();
+      x.fillStyle = "rgba(0,0,0,0.22)"; x.beginPath(); x.arc(hx - 0.5, 0, 7, 0, TAU); x.fill();
+      x.fillStyle = c.head; x.beginPath(); x.arc(hx + 2, 0, 5, 0, TAU); x.fill();
+    } else if (g === "bandana") {
+      x.fillStyle = c.hair; x.beginPath(); x.arc(hx - 2.2, 0, 7.2, 0, TAU); x.fill();
+      x.fillStyle = c.accent; rr(hx - 1, -7.2, 4, 14.4, 1.5); x.fill();
+    } else {
+      x.fillStyle = c.hair; x.beginPath(); x.arc(hx - 2.2, 0, 7.2, 0, TAU); x.fill();
+    }
+    x.restore();
+  }
+
+  buildCharSelect();
+
+  // recalcula el ancho lógico cuando cambia el tamaño de la ventana
+  function resizeCanvas() {
+    const newW = Math.round(H * aspect());
+    if (newW === W) return;
+    W = newW;
+    canvas.width = W; canvas.height = H;
+    game.regionCache = {}; // los obstáculos se regeneran para el nuevo ancho
+    if (player) {
+      player.x = clamp(player.x, player.r, W - player.r);
+      player.y = clamp(player.y, player.r, H - player.r);
+    }
+  }
+  window.addEventListener("resize", resizeCanvas);
 
   // ----------------------------------------------------------------------
   //  Bucle principal
