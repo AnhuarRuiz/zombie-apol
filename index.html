@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zombie Apol — Oleadas</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="game-wrap">
+    <canvas id="game" width="1280" height="720"></canvas>
+
+    <!-- Pantalla de menú / mensajes -->
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <h1>ZOMBIE APOL</h1>
+        <p class="subtitle">Sobrevive las oleadas. Recoge los encargos. No mueras.</p>
+        <div id="overlay-body"></div>
+        <button id="start-btn">JUGAR</button>
+        <div class="controls">
+          <h3>Controles</h3>
+          <ul>
+            <li><b>WASD</b> — moverse</li>
+            <li><b>Shift</b> — correr</li>
+            <li><b>Ratón</b> — apuntar</li>
+            <li><b>Clic izq.</b> — disparar arma principal</li>
+            <li><b>Clic der. / Espacio</b> — ataque cuerpo a cuerpo</li>
+            <li><b>1 / 2</b> — cambiar de arma</li>
+            <li><b>R</b> — recargar</li>
+            <li><b>E</b> — recoger encargo</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
