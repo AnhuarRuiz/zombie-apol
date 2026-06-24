@@ -9,18 +9,44 @@
   // ----------------------------------------------------------------------
   //  Configuración general
   // ----------------------------------------------------------------------
-  const H = 720;             // alto lógico fijo
-  // el ancho lógico se adapta a la proporción real de la ventana (sin franjas negras)
+  // VISTA (lienzo): se adapta a la ventana, alto fijo 720
+  const VH = 720;
   const aspect = () => Math.min(3.0, Math.max(1.2, window.innerWidth / window.innerHeight));
-  let W = Math.round(H * aspect());
-  const REGIONS_X = 4;       // tamaño del mapa en regiones (4x4 = 16 pantallas)
+  let VW = Math.round(VH * aspect());
+  // MUNDO (región): grande, se explora con cámara (no cabe en pantalla)
+  const W = 3200;            // ancho de región (mundo)
+  const H = 1800;            // alto de región (mundo)
+  const ZOOM = 1.8;          // acercamiento de la cámara
+  let cam = { x: 0, y: 0 };
+  const REGIONS_X = 4;       // tamaño del mapa en regiones (4x4 = 16 regiones)
   const REGIONS_Y = 4;
   const EDGE = 40;           // margen para detectar cambio de región
-  const SCALE = 1.5;         // tamaño global de personajes/criaturas (más grande = más detalle)
+  const SCALE = 1.5;         // tamaño global de personajes/criaturas
 
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-  canvas.width = W; canvas.height = H;
+  canvas.width = VW; canvas.height = VH;
+
+  // cámara: ventana del mundo centrada en el jugador (acotada a la región)
+  function computeCam() {
+    if (!player) return { x: 0, y: 0 };
+    const vw = VW / ZOOM, vh = VH / ZOOM;
+    return {
+      x: clamp(player.x - vw / 2, 0, Math.max(0, W - vw)),
+      y: clamp(player.y - vh / 2, 0, Math.max(0, H - vh)),
+    };
+  }
+  // punto de aparición justo fuera de la vista (cerca del jugador), dentro de la región
+  function spawnEdgePoint() {
+    const rx = VW / ZOOM / 2 + 70, ry = VH / ZOOM / 2 + 70;
+    const side = randInt(0, 3);
+    let x, y;
+    if (side === 0) { x = player.x + rand(-rx, rx); y = player.y - ry; }
+    else if (side === 1) { x = player.x + rx; y = player.y + rand(-ry, ry); }
+    else if (side === 2) { x = player.x + rand(-rx, rx); y = player.y + ry; }
+    else { x = player.x - rx; y = player.y + rand(-ry, ry); }
+    return { x: clamp(x, 24, W - 24), y: clamp(y, 24, H - 24) };
+  }
   const overlay = document.getElementById("overlay");
   const overlayBody = document.getElementById("overlay-body");
   const startBtn = document.getElementById("start-btn");
@@ -63,8 +89,8 @@
 
   function updateMouse(e) {
     const r = canvas.getBoundingClientRect();
-    mouse.x = clamp((e.clientX - r.left) / r.width * W, 0, W);
-    mouse.y = clamp((e.clientY - r.top) / r.height * H, 0, H);
+    mouse.x = clamp((e.clientX - r.left) / r.width * VW, 0, VW);
+    mouse.y = clamp((e.clientY - r.top) / r.height * VH, 0, VH);
   }
   canvas.addEventListener("mousemove", updateMouse);
   canvas.addEventListener("mousedown", (e) => {
@@ -160,103 +186,211 @@
   let dropzone = null;     // punto de entrega del encargo
 
   // ----------------------------------------------------------------------
-  //  Generación de regiones — PUEBLO (calles, manzanas, casas, locales, puestos)
+  //  Generación de regiones — PUEBLO orgánico y variado
   // ----------------------------------------------------------------------
-  const WALL_COLORS = ["#b9a07a", "#c8b48c", "#a98e6a", "#cfc1a0", "#b08f78", "#9fb0b3", "#c5a98f"];
-  const ROOF_COLORS = ["#7a4a3a", "#6b5a48", "#8a5340", "#566a72", "#7d6b50", "#5e4636", "#8a7a4a"];
+  const WALL_COLORS = ["#b9a07a", "#c8b48c", "#a98e6a", "#cfc1a0", "#b08f78", "#9fb0b3", "#c5a98f", "#d6c79c", "#a3a99a"];
+  const ROOF_COLORS = ["#7a4a3a", "#6b5a48", "#8a5340", "#566a72", "#7d6b50", "#5e4636", "#8a7a4a", "#933f33", "#48555c"];
   const AWNING_COLORS = ["#c0392b", "#2e7d52", "#2b6ca0", "#c79a2b", "#8e44ad", "#b0563a"];
-  const TOWN_TINTS = ["#3c4a32", "#43492f", "#4a4636", "#3e4738", "#474334"]; // césped/tierra por región
-  const ROAD = 92;   // ancho de calle (transitable)
-  const MARGIN = 92;  // contorno despejado (cubre el punto de entrada al cambiar de región)
-  const SIDEWALK = 10;
-  const ALLEY = 24;
+  const CAR_COLORS = ["#b23a3a", "#3a5fb2", "#cabf4a", "#dcdcdc", "#2c2c2e", "#3a8a52", "#9a6a3a"];
+  const TOWN_TINTS = ["#3c4a32", "#43492f", "#4a4636", "#3e4738", "#474334", "#384830"];
+  const REGION_TYPES = ["residencial", "mercado", "afueras", "mixto"];
+  const ROAD = 92;
+  const MARGIN = 92;
 
   function getRegion(rx, ry) {
     const key = rx + "," + ry;
     if (game.regionCache[key]) return game.regionCache[key];
     const rng = mulberry32((rx * 73856093) ^ (ry * 19349663) ^ 0x9e37);
-    const town = generateTown(rng);
-    const obstacles = [...town.buildings, ...town.stalls]; // sólido para colisión
-    const tint = TOWN_TINTS[(rx * 3 + ry * 5) % TOWN_TINTS.length];
-    const data = { obstacles, town, tint };
+    const regionType = REGION_TYPES[Math.floor(rng() * REGION_TYPES.length)];
+    const tint = TOWN_TINTS[Math.floor(rng() * TOWN_TINTS.length)];
+    const town = generateTown(rng, regionType);
+    // colisión = todos los rectángulos de cada edificio + puestos
+    const obstacles = [];
+    for (const b of town.buildings) for (const r of b.rects) obstacles.push(r);
+    for (const s of town.stalls) obstacles.push(s);
+    const data = { obstacles, town, tint, regionType };
     game.regionCache[key] = data;
     return data;
   }
 
-  function generateTown(rng) {
-    const buildings = [], stalls = [], roads = [];
-    const innerX = MARGIN, innerY = MARGIN;
-    const innerW = W - MARGIN * 2, innerH = H - MARGIN * 2;
-    const cols = clamp(Math.round(innerW / 360), 3, 4);
-    const rows = 1;
-    const blockW = (innerW - (cols - 1) * ROAD) / cols;
-    const blockH = (innerH - (rows - 1) * ROAD) / rows;
-
-    // calles entre manzanas (para dibujar)
-    for (let i = 1; i < cols; i++) roads.push({ x: innerX + i * blockW + (i - 1) * ROAD, y: 0, w: ROAD, h: H, dir: "v" });
-    for (let j = 1; j < rows; j++) roads.push({ x: 0, y: innerY + j * blockH + (j - 1) * ROAD, w: W, h: ROAD, dir: "h" });
-
-    // elige la manzana-plaza (la más cercana al centro de la región)
-    let plaza = null, pd = Infinity;
-    const blocks = [];
-    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-      const bx = innerX + i * (blockW + ROAD), by = innerY + j * (blockH + ROAD);
-      const b = { bx, by, w: blockW, h: blockH, cx: bx + blockW / 2, cy: by + blockH / 2 };
-      const d = Math.hypot(b.cx - W / 2, b.cy - H / 2);
-      blocks.push(b); if (d < pd) { pd = d; plaza = b; }
+  // cortes irregulares: divide una longitud en celdas de distinto tamaño separadas por calles
+  function buildCuts(start, total, rng) {
+    const cells = [], end = start + total;
+    let pos = start;
+    while (end - pos >= 220) {
+      let len = 240 + rng() * 230;
+      if (end - pos - len < 220) len = end - pos;
+      cells.push({ a: pos, len });
+      pos += len;
+      if (pos >= end - 6) break;
+      pos += ROAD * (0.85 + rng() * 0.5); // calle de ancho variable
     }
+    if (!cells.length) cells.push({ a: start, len: total });
+    return cells;
+  }
+
+  function pickTheme(rng, type) {
+    const r = rng();
+    if (type === "residencial") return r < 0.68 ? "houses" : r < 0.85 ? "park" : "shops";
+    if (type === "mercado") return r < 0.42 ? "shops" : r < 0.68 ? "houses" : r < 0.85 ? "park" : "field";
+    if (type === "afueras") return r < 0.4 ? "park" : r < 0.68 ? "field" : r < 0.9 ? "houses" : "shops";
+    return r < 0.42 ? "houses" : r < 0.66 ? "shops" : r < 0.86 ? "park" : "field"; // mixto
+  }
+
+  function generateTown(rng, regionType) {
+    const buildings = [], stalls = [], roads = [], props = [];
+    const innerX = MARGIN, innerY = MARGIN, innerW = W - MARGIN * 2, innerH = H - MARGIN * 2;
+    const cols = buildCuts(innerX, innerW, rng);
+    const rows = buildCuts(innerY, innerH, rng);
+
+    // calles entre celdas (ancho irregular)
+    for (let i = 0; i < cols.length - 1; i++) { const x0 = cols[i].a + cols[i].len; roads.push({ x: x0, y: 0, w: cols[i + 1].a - x0, h: H, dir: "v" }); }
+    for (let j = 0; j < rows.length - 1; j++) { const y0 = rows[j].a + rows[j].len; roads.push({ x: 0, y: y0, w: W, h: rows[j + 1].a - y0, dir: "h" }); }
+
+    // manzanas
+    const blocks = [];
+    for (const c of cols) for (const r of rows) blocks.push({ bx: c.a, by: r.a, w: c.len, h: r.len, cx: c.a + c.len / 2, cy: r.a + r.len / 2 });
+
+    // plaza = manzana más cercana al centro
+    let plaza = blocks[0], pd = Infinity;
+    for (const b of blocks) { const d = Math.hypot(b.cx - W / 2, b.cy - H / 2); if (d < pd) { pd = d; plaza = b; } }
 
     let plazaRect = null;
     for (const b of blocks) {
-      if (b === plaza) {
-        plazaRect = { x: b.bx, y: b.by, w: b.w, h: b.h };
-        makePlaza(b, stalls, rng);
-      } else {
-        fillBlock(b, buildings, rng);
+      if (b === plaza) { plazaRect = { x: b.bx, y: b.by, w: b.w, h: b.h }; makePlaza(b, stalls, props, rng); continue; }
+      const theme = pickTheme(rng, regionType);
+      if (theme === "houses") placeHouses(b, buildings, props, rng);
+      else if (theme === "shops") placeShops(b, buildings, props, rng);
+      else if (theme === "park") placePark(b, props, rng);
+      else placeField(b, buildings, props, rng);
+    }
+    addGlobalProps(roads, props, rng);
+    return { buildings, stalls, roads, plazaRect, props };
+  }
+
+  const pal = (arr, rng) => arr[Math.floor(rng() * arr.length)];
+
+  // ---- casas pequeñas con jardín, valla y árbol; algunas en forma de L ----
+  function placeHouses(b, buildings, props, rng) {
+    const rr = (a, c) => a + rng() * (c - a);
+    const lw = Math.max(150, b.w / Math.max(1, Math.round(b.w / 185)));
+    const lh = Math.max(150, b.h / Math.max(1, Math.round(b.h / 185)));
+    const nc = Math.max(1, Math.floor(b.w / lw)), nr = Math.max(1, Math.floor(b.h / lh));
+    const cw = b.w / nc, ch = b.h / nr;
+    for (let j = 0; j < nr; j++) for (let i = 0; i < nc; i++) {
+      const lx = b.bx + i * cw, ly = b.by + j * ch;
+      if (rng() < 0.16) { // lote-jardín vacío
+        if (rng() < 0.7) props.push({ t: "tree", x: lx + rr(20, cw - 20), y: ly + rr(20, ch - 20), r: 13 + rng() * 8 });
+        continue;
       }
-    }
-    return { buildings, stalls, roads, plazaRect };
-  }
-
-  // rellena una manzana con 1-4 edificios dejando acera y callejones
-  function fillBlock(b, buildings, rng) {
-    const nx = b.w > 720 ? 2 : 1;
-    const ny = b.h > 760 ? 2 : 1;
-    const lotW = (b.w - 2 * SIDEWALK - (nx - 1) * ALLEY) / nx;
-    const lotH = (b.h - 2 * SIDEWALK - (ny - 1) * ALLEY) / ny;
-    if (lotW < 70 || lotH < 70) return;
-    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-      if (rng() < 0.08) continue; // solar vacío ocasional
-      const x = b.bx + SIDEWALK + i * (lotW + ALLEY);
-      const y = b.by + SIDEWALK + j * (lotH + ALLEY);
-      buildings.push(makeBuilding(x, y, lotW, lotH, rng));
+      const pad = 16, maxW = cw - pad * 2, maxH = ch - pad * 2;
+      if (maxW < 56 || maxH < 56) continue;
+      const hw = rr(maxW * 0.55, maxW * 0.86), hh = rr(maxH * 0.52, maxH * 0.82);
+      const hx = lx + pad + rng() * (maxW - hw), hy = ly + pad + rng() * (maxH - hh);
+      buildings.push(makeHouse(hx, hy, hw, hh, rng));
+      props.push({ t: "fence", x: lx + 7, y: ly + 7, w: cw - 14, h: ch - 14 });
+      if (rng() < 0.7) props.push({ t: "tree", x: lx + rr(16, cw - 16), y: ly + rr(16, ch - 16), r: 11 + rng() * 6 });
+      if (rng() < 0.45) props.push({ t: "bush", x: lx + rr(16, cw - 16), y: ly + rr(16, ch - 16) });
     }
   }
 
-  function makeBuilding(x, y, w, h, rng) {
-    const shop = rng() < 0.42;
-    return {
-      x, y, w, h, kind: shop ? "shop" : "house",
-      wall: WALL_COLORS[Math.floor(rng() * WALL_COLORS.length)],
-      roof: ROOF_COLORS[Math.floor(rng() * ROOF_COLORS.length)],
-      awning: shop ? AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)] : null,
-      door: (w > h ? "S" : "E"), // lado de la puerta (sur o este)
-      seed: Math.floor(rng() * 1000),
-    };
+  function makeHouse(x, y, w, h, rng) {
+    const wall = pal(WALL_COLORS, rng), roof = pal(ROOF_COLORS, rng);
+    let rects;
+    if (rng() < 0.3 && w > 116 && h > 116) { // forma en L
+      const tw = w * (0.5 + rng() * 0.2), th = h * (0.42 + rng() * 0.12);
+      const left = rng() < 0.5;
+      rects = [{ x, y: y + th, w, h: h - th }, { x: left ? x : x + (w - tw), y, w: tw, h: th }];
+    } else {
+      rects = [{ x, y, w, h }];
+    }
+    return { rects, x, y, w, h, kind: "house", wall, roof, roofType: rng() < 0.62 ? "gable" : "hip", awning: null, door: w > h ? "S" : "E" };
   }
 
-  // plaza con puestos en el borde (centro despejado para aparecer)
-  function makePlaza(b, stalls, rng) {
+  // ---- locales / tiendas (medianos, tejado plano y toldo) ----
+  function placeShops(b, buildings, props, rng) {
+    const rr = (a, c) => a + rng() * (c - a);
+    const pad = 18, gap = 22;
+    const n = b.w > 540 ? 3 : b.w > 320 ? 2 : 1;
+    const lw = (b.w - pad * 2 - (n - 1) * gap) / n;
+    if (lw < 70) return;
+    for (let i = 0; i < n; i++) {
+      if (rng() < 0.12) continue;
+      const sx = b.bx + pad + i * (lw + gap);
+      const sh = Math.min(b.h - pad * 2, rr(150, 230));
+      const sy = b.by + pad + rng() * Math.max(0, b.h - pad * 2 - sh);
+      buildings.push(makeShop(sx, sy, lw, sh, rng));
+    }
+  }
+
+  function makeShop(x, y, w, h, rng) {
+    return { rects: [{ x, y, w, h }], x, y, w, h, kind: "shop", wall: pal(WALL_COLORS, rng), roof: pal(ROOF_COLORS, rng), roofType: "flat", awning: pal(AWNING_COLORS, rng), door: w > h ? "S" : "E" };
+  }
+
+  // ---- parque: árboles, estanque y banco (sin edificios) ----
+  function placePark(b, props, rng) {
+    const rr = (a, c) => a + rng() * (c - a);
+    if (rng() < 0.5 && b.w > 200 && b.h > 180) {
+      const pw = rr(90, Math.min(180, b.w - 60)), ph = rr(70, Math.min(140, b.h - 60));
+      props.push({ t: "pond", x: b.cx - pw / 2, y: b.cy - ph / 2, w: pw, h: ph });
+    }
+    const n = Math.max(3, Math.floor(b.w * b.h / 24000));
+    for (let i = 0; i < n; i++) {
+      const x = b.bx + rr(22, b.w - 22), y = b.by + rr(22, b.h - 22);
+      props.push(rng() < 0.72 ? { t: "tree", x, y, r: 14 + rng() * 11 } : { t: "bush", x, y });
+    }
+    if (rng() < 0.6) props.push({ t: "bench", x: b.cx - 18, y: b.cy + rr(-40, 40), horiz: true });
+  }
+
+  // ---- descampado / huerta: cobertizo ocasional, cajas y árboles sueltos ----
+  function placeField(b, buildings, props, rng) {
+    const rr = (a, c) => a + rng() * (c - a);
+    if (rng() < 0.5 && b.w > 160 && b.h > 130) {
+      const w = rr(120, Math.min(210, b.w - 50)), h = rr(90, Math.min(160, b.h - 50));
+      const x = b.bx + rr(20, Math.max(20, b.w - w - 20)), y = b.by + rr(20, Math.max(20, b.h - h - 20));
+      const shed = makeShop(x, y, w, h, rng); shed.awning = null; buildings.push(shed);
+    }
+    const nc = 2 + Math.floor(rng() * 4);
+    for (let i = 0; i < nc; i++) props.push({ t: "crate", x: b.bx + rr(24, b.w - 24), y: b.by + rr(24, b.h - 24) });
+    const nt = 1 + Math.floor(rng() * 3);
+    for (let i = 0; i < nt; i++) props.push({ t: "tree", x: b.bx + rr(24, b.w - 24), y: b.by + rr(24, b.h - 24), r: 14 + rng() * 8 });
+  }
+
+  // plaza con puestos, fuente (en drawPlaza), árboles y banco; centro despejado
+  function makePlaza(b, stalls, props, rng) {
     const sw = 56, sh = 58;
     const spots = [
       { x: b.bx + 40, y: b.by + 36 }, { x: b.bx + b.w - sw - 40, y: b.by + 36 },
-      { x: b.bx + 40, y: b.by + b.h - sh - 36 }, { x: b.bx + b.w - sw - 40, y: b.by + b.h - sh - 36 },
+      { x: b.bx + 40, y: b.by + b.h - sh - 40 }, { x: b.bx + b.w - sw - 40, y: b.by + b.h - sh - 40 },
       { x: b.cx - sw / 2, y: b.by + 30 }, { x: b.cx - sw / 2, y: b.by + b.h - sh - 30 },
     ];
     for (const sp of spots) {
       if (rng() < 0.3) continue;
-      if (dist2(sp.x + sw / 2, sp.y + sh / 2, W / 2, H / 2) < 150 * 150) continue; // deja el centro libre
-      stalls.push({ x: sp.x, y: sp.y, w: sw, h: sh, awning: AWNING_COLORS[Math.floor(rng() * AWNING_COLORS.length)] });
+      if (dist2(sp.x + sw / 2, sp.y + sh / 2, W / 2, H / 2) < 150 * 150) continue;
+      stalls.push({ x: sp.x, y: sp.y, w: sw, h: sh, awning: pal(AWNING_COLORS, rng) });
+    }
+    props.push({ t: "tree", x: b.bx + 32, y: b.by + b.h - 32, r: 20 });
+    props.push({ t: "tree", x: b.bx + b.w - 32, y: b.by + 32, r: 20 });
+  }
+
+  // decoraciones globales: farolas en calles, árboles perimetrales, coches
+  function addGlobalProps(roads, props, rng) {
+    const rr = (a, c) => a + rng() * (c - a);
+    for (const r of roads) {
+      if (r.dir === "v") for (let y = 150; y < H - 110; y += 270) { props.push({ t: "light", x: r.x - 10, y }); props.push({ t: "light", x: r.x + r.w + 10, y }); }
+      else for (let x = 150; x < W - 110; x += 270) { props.push({ t: "light", x, y: r.y - 10 }); props.push({ t: "light", x, y: r.y + r.h + 10 }); }
+      if (rng() < 0.6) {
+        if (r.dir === "h") props.push({ t: "car", x: rr(MARGIN + 100, W - MARGIN - 100), y: r.y + 18, color: pal(CAR_COLORS, rng), horiz: true });
+        else props.push({ t: "car", x: r.x + 18, y: rr(MARGIN + 100, H - MARGIN - 100), color: pal(CAR_COLORS, rng), horiz: false });
+      }
+    }
+    for (let i = 0; i < 40; i++) {
+      const side = Math.floor(rng() * 4); let x, y;
+      if (side === 0) { x = rr(30, W - 30); y = rr(26, MARGIN - 26); }
+      else if (side === 1) { x = rr(W - MARGIN + 26, W - 26); y = rr(30, H - 30); }
+      else if (side === 2) { x = rr(30, W - 30); y = rr(H - MARGIN + 26, H - 26); }
+      else { x = rr(26, MARGIN - 26); y = rr(30, H - 30); }
+      props.push({ t: "tree", x, y, r: 18 + rng() * 10 });
     }
   }
 
@@ -389,13 +523,9 @@
   const Z_EYE = ["#c24a3a", "#caa23a", "#9a3a3a", "#d8d2b0", "#b86a2a"];
 
   function spawnZombie() {
-    // aparece desde un borde de la pantalla
-    const side = randInt(0, 3);
-    let x, y;
-    if (side === 0) { x = rand(0, W); y = -30; }
-    else if (side === 1) { x = W + 30; y = rand(0, H); }
-    else if (side === 2) { x = rand(0, W); y = H + 30; }
-    else { x = -30; y = rand(0, H); }
+    // aparece justo fuera de la vista, cerca del jugador
+    const p = spawnEdgePoint();
+    const x = p.x, y = p.y;
     const tier = Math.random();
     let z = {
       x, y, r: 15, hp: 60, maxHp: 60, speed: rand(55, 80),
@@ -432,15 +562,10 @@
     });
   }
 
-  // enemigo armado que entra desde un borde (emboscada en ruta)
+  // enemigo armado que entra cerca de la vista (emboscada en ruta)
   function spawnGuardEdge() {
-    const side = randInt(0, 3);
-    let x, y;
-    if (side === 0) { x = rand(0, W); y = -28; }
-    else if (side === 1) { x = W + 28; y = rand(0, H); }
-    else if (side === 2) { x = rand(0, W); y = H + 28; }
-    else { x = -28; y = rand(0, H); }
-    spawnGuard(clamp(x, 30, W - 30), clamp(y, 30, H - 30));
+    const p = spawnEdgePoint();
+    spawnGuard(p.x, p.y);
   }
 
   // perro de ataque: rápido, cuerpo a cuerpo, acompaña a los guardias
@@ -453,13 +578,8 @@
     });
   }
   function spawnDogEdge() {
-    const side = randInt(0, 3);
-    let x, y;
-    if (side === 0) { x = rand(0, W); y = -28; }
-    else if (side === 1) { x = W + 28; y = rand(0, H); }
-    else if (side === 2) { x = rand(0, W); y = H + 28; }
-    else { x = -28; y = rand(0, H); }
-    spawnDog(clamp(x, 30, W - 30), clamp(y, 30, H - 30));
+    const p = spawnEdgePoint();
+    spawnDog(p.x, p.y);
   }
 
   function spawnParticles(x, y, color, n, spd) {
@@ -870,8 +990,10 @@
   }
 
   function updatePlayer(dt) {
-    // dirección de apunte (hacia el ratón)
-    player.aim = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    // dirección de apunte (hacia el ratón, convertido a coordenadas del mundo)
+    const c = computeCam();
+    const mwx = c.x + mouse.x / ZOOM, mwy = c.y + mouse.y / ZOOM;
+    player.aim = Math.atan2(mwy - player.y, mwx - player.x);
 
     // movimiento
     let dx = 0, dy = 0;
@@ -1113,7 +1235,12 @@
   //  Dibujo
   // ----------------------------------------------------------------------
   function draw() {
-    ctx.clearRect(0, 0, W, H);
+    ctx.clearRect(0, 0, VW, VH);
+    cam = computeCam();
+    // ---- mundo (con cámara) ----
+    ctx.save();
+    ctx.scale(ZOOM, ZOOM);
+    ctx.translate(-cam.x, -cam.y);
     drawGround();
     drawTown();
     if (game.state === "mission" && encargo && inRegion(game.mission.px, game.mission.py)) drawEncargo();
@@ -1126,6 +1253,8 @@
     if (player) drawPlayer();
     drawBullets(bullets, null);
     drawParticles();
+    ctx.restore();
+    // ---- interfaz (sin cámara) ----
     drawHUD();
     drawFlash();
     drawHurtVignette();
@@ -1138,12 +1267,12 @@
     // textura de césped: motas sutiles deterministas
     const r2 = mulberry32((game.region.x + 7) * 101 + (game.region.y + 3) * 53);
     ctx.fillStyle = "rgba(0,0,0,0.06)";
-    for (let i = 0; i < 90; i++) {
-      const x = r2() * W, y = r2() * H, s = 2 + r2() * 4;
+    for (let i = 0; i < 420; i++) {
+      const x = r2() * W, y = r2() * H, s = 2 + r2() * 5;
       ctx.fillRect(x, y, s, s);
     }
     ctx.fillStyle = "rgba(255,255,255,0.025)";
-    for (let i = 0; i < 60; i++) ctx.fillRect(r2() * W, r2() * H, 2, 2);
+    for (let i = 0; i < 260; i++) ctx.fillRect(r2() * W, r2() * H, 2, 2);
     // borde de la región (límite donde se cambia de zona)
     ctx.strokeStyle = "rgba(120,180,90,0.16)";
     ctx.lineWidth = 6;
@@ -1152,10 +1281,67 @@
 
   function drawTown() {
     const t = getRegion(game.region.x, game.region.y).town;
+    // recorte a la vista de cámara (rendimiento)
+    const vx0 = cam.x, vy0 = cam.y, vx1 = cam.x + VW / ZOOM, vy1 = cam.y + VH / ZOOM;
+    const vis = (x, y, w, h) => x < vx1 + 60 && x + w > vx0 - 60 && y < vy1 + 60 && y + h > vy0 - 60;
+    const visP = (p) => p.w ? vis(p.x, p.y, p.w, p.h) : vis(p.x - 40, p.y - 40, 80, 80);
     for (const r of t.roads) drawRoad(r);
     if (t.plazaRect) drawPlaza(t.plazaRect);
-    for (const b of t.buildings) drawBuilding(b);
-    for (const s of t.stalls) drawStall(s);
+    // props de suelo (vallas, estanques) por debajo de los edificios
+    for (const p of t.props) if ((p.t === "fence" || p.t === "pond") && visP(p)) drawProp(p);
+    for (const b of t.buildings) if (vis(b.x, b.y, b.w, b.h)) drawBuilding(b);
+    for (const s of t.stalls) if (vis(s.x, s.y, s.w, s.h)) drawStall(s);
+    // props superiores (árboles, farolas, coches, etc.)
+    for (const p of t.props) if (p.t !== "fence" && p.t !== "pond" && visP(p)) drawProp(p);
+  }
+
+  function drawProp(p) {
+    if (p.t === "tree") {
+      ctx.fillStyle = "rgba(0,0,0,0.30)";
+      ctx.beginPath(); ctx.ellipse(p.x + 5, p.y + 7, p.r, p.r * 0.5, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#5a4030"; ctx.fillRect(p.x - 3, p.y - 2, 6, 9); // tronco
+      ctx.fillStyle = "#2f5a30"; ctx.beginPath(); ctx.arc(p.x, p.y - 4, p.r, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#3c7038"; ctx.beginPath(); ctx.arc(p.x - p.r * 0.3, p.y - 4 - p.r * 0.3, p.r * 0.62, 0, TAU); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.10)"; ctx.beginPath(); ctx.arc(p.x - p.r * 0.4, p.y - 4 - p.r * 0.4, p.r * 0.34, 0, TAU); ctx.fill();
+    } else if (p.t === "light") {
+      ctx.fillStyle = "rgba(0,0,0,0.28)"; ctx.beginPath(); ctx.ellipse(p.x + 6, p.y + 3, 8, 3.5, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#3a3a40"; ctx.fillRect(p.x - 2.5, p.y - 18, 5, 20); // poste
+      ctx.fillStyle = "rgba(240,210,120,0.16)"; ctx.beginPath(); ctx.arc(p.x, p.y - 20, 15, 0, TAU); ctx.fill(); // halo
+      ctx.fillStyle = "#e8c860"; ctx.beginPath(); ctx.arc(p.x, p.y - 20, 5, 0, TAU); ctx.fill(); // lámpara
+    } else if (p.t === "car") {
+      const w = p.horiz ? 62 : 30, h = p.horiz ? 30 : 62;
+      ctx.fillStyle = "rgba(0,0,0,0.32)"; roundRectPath(p.x - w / 2 + 5, p.y - h / 2 + 6, w, h, 7); ctx.fill();
+      ctx.fillStyle = p.color; roundRectPath(p.x - w / 2, p.y - h / 2, w, h, 7); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.12)"; roundRectPath(p.x - w / 2 + 3, p.y - h / 2 + 3, w - 6, (h - 6) * 0.42, 4); ctx.fill();
+      ctx.fillStyle = "#2a3038";
+      if (p.horiz) { ctx.fillRect(p.x - w / 2 + 12, p.y - h / 2 + 5, 11, h - 10); ctx.fillRect(p.x + w / 2 - 23, p.y - h / 2 + 5, 11, h - 10); }
+      else { ctx.fillRect(p.x - w / 2 + 5, p.y - h / 2 + 12, w - 10, 11); ctx.fillRect(p.x - w / 2 + 5, p.y + h / 2 - 23, w - 10, 11); }
+      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 1.5; roundRectPath(p.x - w / 2, p.y - h / 2, w, h, 7); ctx.stroke();
+    } else if (p.t === "bush") {
+      ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.beginPath(); ctx.ellipse(p.x + 3, p.y + 4, 11, 6, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#356b35"; ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#447a44"; ctx.beginPath(); ctx.arc(p.x - 3, p.y - 3, 6, 0, TAU); ctx.fill();
+    } else if (p.t === "fence") {
+      ctx.strokeStyle = "#8a7250"; ctx.lineWidth = 3; ctx.setLineDash([9, 7]);
+      ctx.strokeRect(p.x, p.y, p.w, p.h); ctx.setLineDash([]);
+      ctx.fillStyle = "#6e5a3c"; // postes en las esquinas
+      ctx.fillRect(p.x - 2, p.y - 2, 5, 5); ctx.fillRect(p.x + p.w - 3, p.y - 2, 5, 5);
+      ctx.fillRect(p.x - 2, p.y + p.h - 3, 5, 5); ctx.fillRect(p.x + p.w - 3, p.y + p.h - 3, 5, 5);
+    } else if (p.t === "pond") {
+      ctx.fillStyle = "rgba(0,0,0,0.18)"; ctx.beginPath(); ctx.ellipse(p.x + p.w / 2 + 4, p.y + p.h / 2 + 5, p.w / 2, p.h / 2, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#3f6f86"; ctx.beginPath(); ctx.ellipse(p.x + p.w / 2, p.y + p.h / 2, p.w / 2, p.h / 2, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "#5a92aa"; ctx.beginPath(); ctx.ellipse(p.x + p.w / 2, p.y + p.h / 2, p.w / 2 - 8, p.h / 2 - 8, 0, 0, TAU); ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.18)"; ctx.beginPath(); ctx.ellipse(p.x + p.w * 0.38, p.y + p.h * 0.36, p.w * 0.12, p.h * 0.08, 0, 0, TAU); ctx.fill();
+    } else if (p.t === "bench") {
+      ctx.fillStyle = "rgba(0,0,0,0.25)"; ctx.fillRect(p.x + 2, p.y + 3, 34, 12);
+      ctx.fillStyle = "#6b4a2a"; ctx.fillRect(p.x, p.y, 34, 12);
+      ctx.fillStyle = "#5a3f24"; ctx.fillRect(p.x, p.y, 34, 3);
+    } else if (p.t === "crate") {
+      ctx.fillStyle = "rgba(0,0,0,0.28)"; ctx.fillRect(p.x - 9, p.y - 7, 22, 22);
+      ctx.fillStyle = "#8a6a3a"; ctx.fillRect(p.x - 11, p.y - 9, 22, 22);
+      ctx.strokeStyle = "#5e4426"; ctx.lineWidth = 2; ctx.strokeRect(p.x - 11, p.y - 9, 22, 22);
+      ctx.beginPath(); ctx.moveTo(p.x - 11, p.y - 9); ctx.lineTo(p.x + 11, p.y + 13); ctx.moveTo(p.x + 11, p.y - 9); ctx.lineTo(p.x - 11, p.y + 13); ctx.stroke();
+    }
   }
 
   function drawRoad(r) {
@@ -1196,42 +1382,55 @@
   }
 
   function drawBuilding(b) {
-    const x = b.x, y = b.y, w = b.w, h = b.h;
-    // acera bajo el edificio
+    // acera bajo el edificio (sigue el contorno)
     ctx.fillStyle = "#7a7d76";
-    roundRectPath(x - 8, y - 8, w + 16, h + 16, 6); ctx.fill();
+    for (const r of b.rects) { roundRectPath(r.x - 7, r.y - 7, r.w + 14, r.h + 14, 6); ctx.fill(); }
     // sombra proyectada
-    ctx.fillStyle = "rgba(0,0,0,0.28)";
-    roundRectPath(x + 5, y + 6, w, h, 4); ctx.fill();
-    // muros
+    ctx.fillStyle = "rgba(0,0,0,0.30)";
+    for (const r of b.rects) ctx.fillRect(r.x + 6, r.y + 8, r.w, r.h);
+    // muros (esquinas rectas para que las piezas en L se fundan)
     ctx.fillStyle = b.wall;
-    roundRectPath(x, y, w, h, 4); ctx.fill();
-    // tejado (interior, deja banda de muro con ventanas)
-    const I = 14;
+    for (const r of b.rects) ctx.fillRect(r.x, r.y, r.w, r.h);
+    // tejado por cada pieza
+    for (const r of b.rects) drawRoof(r, b);
+    // ventanas y puerta sobre el rectángulo principal
+    drawWindows(b.rects[0]);
+    drawDoor(b);
+  }
+
+  function drawRoof(r, b) {
+    const I = 13, x = r.x, y = r.y, w = r.w, h = r.h;
+    if (w - 2 * I < 6 || h - 2 * I < 6) { ctx.fillStyle = b.roof; ctx.fillRect(x + 3, y + 3, w - 6, h - 6); return; }
     ctx.fillStyle = b.roof;
-    roundRectPath(x + I, y + I, w - 2 * I, h - 2 * I, 3); ctx.fill();
-    if (b.kind === "house") {
-      // caballete del tejado a lo largo del lado mayor + aguas
+    ctx.fillRect(x + I, y + I, w - 2 * I, h - 2 * I);
+    if (b.roofType === "gable") {
       ctx.strokeStyle = "rgba(255,255,255,0.13)"; ctx.lineWidth = 3;
       ctx.beginPath();
       if (w >= h) { ctx.moveTo(x + I + 6, y + h / 2); ctx.lineTo(x + w - I - 6, y + h / 2); }
       else { ctx.moveTo(x + w / 2, y + I + 6); ctx.lineTo(x + w / 2, y + h - I - 6); }
       ctx.stroke();
+      ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 2; ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
+      ctx.fillStyle = "#4a3a30"; ctx.fillRect(x + w - I - 16, y + I + 7, 11, 11); // chimenea
+    } else if (b.roofType === "hip") {
+      // tejado a cuatro aguas: líneas diagonales desde el caballete a las esquinas
       ctx.strokeStyle = "rgba(0,0,0,0.18)"; ctx.lineWidth = 2;
-      ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
-      // chimenea
-      ctx.fillStyle = "#4a3a30"; ctx.fillRect(x + w - I - 18, y + I + 8, 12, 12);
+      ctx.beginPath();
+      ctx.moveTo(x, y); ctx.lineTo(x + I, y + I);
+      ctx.moveTo(x + w, y); ctx.lineTo(x + w - I, y + I);
+      ctx.moveTo(x, y + h); ctx.lineTo(x + I, y + h - I);
+      ctx.moveTo(x + w, y + h); ctx.lineTo(x + w - I, y + h - I);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (w >= h) { ctx.moveTo(x + I + 8, y + h / 2); ctx.lineTo(x + w - I - 8, y + h / 2); }
+      else { ctx.moveTo(x + w / 2, y + I + 8); ctx.lineTo(x + w / 2, y + h - I - 8); }
+      ctx.stroke();
     } else {
-      // local: tejado plano con unidad de aire y parapeto
-      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 3;
-      ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
+      // plano (local): parapeto + unidad de aire
+      ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 3; ctx.strokeRect(x + I, y + I, w - 2 * I, h - 2 * I);
       ctx.fillStyle = "#5a5f63"; ctx.fillRect(x + w / 2 - 11, y + h / 2 - 8, 22, 16);
       ctx.fillStyle = "#474b4e"; ctx.fillRect(x + w / 2 - 8, y + h / 2 - 5, 7, 10);
     }
-    // ventanas en la banda de muro
-    drawWindows(b, I);
-    // puerta + toldo (locales) en su lado
-    drawDoor(b);
   }
 
   function drawWindows(b, I) {
@@ -1762,11 +1961,11 @@
   function drawHurtVignette() {
     if (!player || player.hurtFlash <= 0) return;
     const a = clamp(player.hurtFlash, 0, 0.25) / 0.25 * 0.4;
-    const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.75);
+    const g = ctx.createRadialGradient(VW / 2, VH / 2, VH * 0.3, VW / 2, VH / 2, VH * 0.75);
     g.addColorStop(0, "rgba(180,0,0,0)");
     g.addColorStop(1, `rgba(180,0,0,${a})`);
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(0, 0, VW, VH);
   }
 
   // ----------------------------------------------------------------------
@@ -1809,27 +2008,27 @@
     ctx.fillStyle = "#fff";
     if (game.state === "wave") {
       ctx.fillStyle = "#ff9a8a";
-      ctx.fillText(`OLEADA ${game.wave} / ${game.maxWaves}`, W / 2, 34);
+      ctx.fillText(`OLEADA ${game.wave} / ${game.maxWaves}`, VW / 2, 34);
       ctx.font = "15px Segoe UI"; ctx.fillStyle = "#e8efe8";
-      ctx.fillText(`Zombies: ${game.zombiesKilled} / ${game.zombiesGoal}`, W / 2, 56);
+      ctx.fillText(`Zombies: ${game.zombiesKilled} / ${game.zombiesGoal}`, VW / 2, 56);
     } else if (game.state === "mission") {
       const t = missionTarget();
       const here = game.region.x === t.x && game.region.y === t.y;
       if (game.mission.phase === "pickup") {
         ctx.fillStyle = "#ffd86b";
-        ctx.fillText("RECOGE EL ENCARGO", W / 2, 34);
+        ctx.fillText("RECOGE EL ENCARGO", VW / 2, 34);
         ctx.font = "15px Segoe UI"; ctx.fillStyle = "#e8efe8";
         let pendingDef = 0;
         for (const p of pending) if (p.kind === "enemy" || p.kind === "dog") pendingDef++;
         const defenders = enemies.length + dogs.length + pendingDef;
         ctx.fillText(here ? (defenders ? `Defensores restantes: ${defenders}` : "Pulsa E junto al encargo")
-          : `Dirígete a la región ${regName(t.x, t.y)}`, W / 2, 56);
+          : `Dirígete a la región ${regName(t.x, t.y)}`, VW / 2, 56);
       } else {
         ctx.fillStyle = "#9fe86a";
-        ctx.fillText("ENTREGA EL ENCARGO", W / 2, 34);
+        ctx.fillText("ENTREGA EL ENCARGO", VW / 2, 34);
         ctx.font = "15px Segoe UI"; ctx.fillStyle = "#e8efe8";
         ctx.fillText(here ? "Llega al punto de entrega y pulsa E"
-          : `Llévalo a la región ${regName(t.x, t.y)}`, W / 2, 56);
+          : `Llévalo a la región ${regName(t.x, t.y)}`, VW / 2, 56);
         // cronómetro de entrega
         const tleft = Math.max(0, game.deliverTime);
         const mm = Math.floor(tleft / 60), ss = Math.floor(tleft % 60);
@@ -1838,7 +2037,7 @@
         ctx.fillStyle = low
           ? ((Math.floor(performance.now() / 200) % 2) ? "#ff5a4a" : "#ffd0c0")
           : "#ffd86b";
-        ctx.fillText(`⏱ ${mm}:${ss.toString().padStart(2, "0")}`, W / 2, 82);
+        ctx.fillText(`⏱ ${mm}:${ss.toString().padStart(2, "0")}`, VW / 2, 82);
       }
     }
     ctx.textAlign = "left";
@@ -1846,7 +2045,7 @@
     // puntuación
     ctx.font = "13px Segoe UI"; ctx.fillStyle = "#9fb09f";
     ctx.textAlign = "right";
-    ctx.fillText(`Puntos: ${game.score}`, W - 20, 30);
+    ctx.fillText(`Puntos: ${game.score}`, VW - 20, 30);
     ctx.textAlign = "left";
 
     drawMinimap();
@@ -1857,7 +2056,7 @@
     const cell = 26, pad = 4;
     const mw = REGIONS_X * cell + pad * 2;
     const mh = REGIONS_Y * cell + pad * 2;
-    const ox = W - mw - 20, oy = H - mh - 20;
+    const ox = VW - mw - 20, oy = VH - mh - 20;
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fillRect(ox - 4, oy - 18, mw + 8, mh + 22);
     ctx.fillStyle = "#9fb09f"; ctx.font = "11px Segoe UI";
@@ -1888,19 +2087,20 @@
     }
   }
 
-  // flechas que indican hacia dónde se puede cambiar de región
+  // flechas que indican un límite de región cercano (en coordenadas de vista)
   function drawEdgeArrows() {
-    ctx.fillStyle = "rgba(150,200,110,0.5)";
-    const r = game.region;
+    if (!player) return;
+    ctx.fillStyle = "rgba(150,200,110,0.55)";
+    const r = game.region, near = 420;
     const tri = (x, y, ang) => {
       ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
-      ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(-10, -12); ctx.lineTo(-10, 12); ctx.closePath(); ctx.fill();
       ctx.restore();
     };
-    if (r.x > 0) tri(24, H / 2, Math.PI);
-    if (r.x < REGIONS_X - 1) tri(W - 24, H / 2, 0);
-    if (r.y > 0) tri(W / 2, 24, -Math.PI / 2);
-    if (r.y < REGIONS_Y - 1) tri(W / 2, H - 24, Math.PI / 2);
+    if (r.x > 0 && player.x < near) tri(26, VH / 2, Math.PI);
+    if (r.x < REGIONS_X - 1 && player.x > W - near) tri(VW - 26, VH / 2, 0);
+    if (r.y > 0 && player.y < near) tri(VW / 2, 26, -Math.PI / 2);
+    if (r.y < REGIONS_Y - 1 && player.y > H - near) tri(VW / 2, VH - 26, Math.PI / 2);
   }
 
   function drawFlash() {
@@ -1908,12 +2108,12 @@
     const a = clamp(game.flashTime / 0.6, 0, 1);
     ctx.globalAlpha = a;
     ctx.textAlign = "center";
-    ctx.fillStyle = "#000"; ctx.fillRect(0, H / 2 - 70, W, 130);
+    ctx.fillStyle = "#000"; ctx.fillRect(0, VH / 2 - 70, VW, 130);
     ctx.fillStyle = "#9fe86a"; ctx.font = "bold 52px Segoe UI";
-    ctx.fillText(game.flashMsg.title, W / 2, H / 2 - 8);
+    ctx.fillText(game.flashMsg.title, VW / 2, VH / 2 - 8);
     if (game.flashMsg.sub) {
       ctx.fillStyle = "#e8efe8"; ctx.font = "22px Segoe UI";
-      ctx.fillText(game.flashMsg.sub, W / 2, H / 2 + 32);
+      ctx.fillText(game.flashMsg.sub, VW / 2, VH / 2 + 32);
     }
     ctx.textAlign = "left";
     ctx.globalAlpha = 1;
@@ -2060,15 +2260,10 @@
 
   // recalcula el ancho lógico cuando cambia el tamaño de la ventana
   function resizeCanvas() {
-    const newW = Math.round(H * aspect());
-    if (newW === W) return;
-    W = newW;
-    canvas.width = W; canvas.height = H;
-    game.regionCache = {}; // los obstáculos se regeneran para el nuevo ancho
-    if (player) {
-      player.x = clamp(player.x, player.r, W - player.r);
-      player.y = clamp(player.y, player.r, H - player.r);
-    }
+    const newVW = Math.round(VH * aspect());
+    if (newVW === VW) return;
+    VW = newVW;
+    canvas.width = VW; canvas.height = VH;
   }
   window.addEventListener("resize", resizeCanvas);
 
